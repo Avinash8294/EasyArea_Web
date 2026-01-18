@@ -3,7 +3,7 @@ import { Undo, Redo, Eye, EyeOff, Trash2, Ruler, Edit3, FolderOpen, MapPin, File
 
 const LandAreaCalculator = () => {
     const [screen, setScreen] = useState('dashboard');
-    const [image, setImage] = useState(null);
+    const [image, setImage] = useState<string | null>(null);
     const [vertices, setVertices] = useState([]);
     const [calibrationPoints, setCalibrationPoints] = useState([]);
     const [calibrationDistance, setCalibrationDistance] = useState('');
@@ -25,12 +25,18 @@ const LandAreaCalculator = () => {
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
     const [draggedVertexIndex, setDraggedVertexIndex] = useState(null);
     const [draggedPolygonId, setDraggedPolygonId] = useState(null);
-    const canvasRef = useRef(null);
-    const imageRef = useRef(null);
+    const [lastTouchDistance, setLastTouchDistance] = useState<number | null>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const imageRef = useRef<HTMLImageElement>(null);
     const fileInputRef = useRef(null);
 
+    // Define types for our data structures
+    type Point = { x: number; y: number };
+    type Polygon = { id: number; vertices: Point[]; label: string };
+    type Layer = { id: number; name: string; vertices: Point[]; polygons: Polygon[]; visible: boolean; color: string };
+
     // Get active layer
-    const activeLayer = layers.find(l => l.id === activeLayerId);
+    const activeLayer = layers.find(l => l.id === activeLayerId) as Layer | undefined;
 
     // Update active layer
     const updateActiveLayer = (updates) => {
@@ -137,7 +143,7 @@ const LandAreaCalculator = () => {
         if (file) {
             const reader = new FileReader();
             reader.onload = (event) => {
-                setImage(event.target.result);
+                setImage(event.target.result as string);
                 setScreen('canvas');
                 const initialLayer = { id: 1, name: 'Layer 1', vertices: [], polygons: [], visible: true, color: '#2196F3' };
                 setLayers([initialLayer]);
@@ -462,13 +468,100 @@ const LandAreaCalculator = () => {
         }
     };
 
+    // Calculate distance between two touch points
+    const getTouchDistance = (touch1: React.Touch, touch2: React.Touch) => {
+        return Math.sqrt(
+            Math.pow(touch2.clientX - touch1.clientX, 2) +
+            Math.pow(touch2.clientY - touch1.clientY, 2)
+        );
+    };
+
     // Handle wheel for zoom
-    const handleWheel = (e) => {
+    const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
         e.preventDefault();
         if (mode === 'zoom') {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // Calculate the world coordinates of the mouse position before zoom
+            const worldMouseX = (mouseX - pan.x) / zoom;
+            const worldMouseY = (mouseY - pan.y) / zoom;
+
+            // Determine zoom direction
             const delta = e.deltaY > 0 ? 0.9 : 1.1;
-            setZoom(prev => Math.max(0.1, Math.min(5, prev * delta)));
+            const newZoom = Math.max(0.1, Math.min(5, zoom * delta));
+
+            // Calculate new pan to keep the mouse position fixed during zoom
+            const newPanX = mouseX - worldMouseX * newZoom;
+            const newPanY = mouseY - worldMouseY * newZoom;
+
+            setZoom(newZoom);
+            setPan({ x: newPanX, y: newPanY });
         }
+    };
+
+    // Handle touch start
+    const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+        if (mode === 'zoom') {
+            if (e.touches.length === 2) {
+                const touchDistance = getTouchDistance(e.touches[0], e.touches[1]);
+                setLastTouchDistance(touchDistance);
+            } else if (e.touches.length === 1) {
+                setIsDragging(true);
+                setDragStart({ x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y });
+            }
+        }
+    };
+
+    // Handle touch move
+    const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+        e.preventDefault();
+        if (mode === 'zoom' && e.touches.length === 2) {
+            const canvas = canvasRef.current;
+            if (!canvas || !lastTouchDistance) return;
+
+            const touchDistance = getTouchDistance(e.touches[0], e.touches[1]);
+            const zoomFactor = touchDistance / lastTouchDistance;
+
+            // Calculate midpoint between touches
+            const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+            const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+
+            const rect = canvas.getBoundingClientRect();
+            const relativeMidX = midX - rect.left;
+            const relativeMidY = midY - rect.top;
+
+            // Calculate the world coordinates of the midpoint before zoom
+            const worldMidX = (relativeMidX - pan.x) / zoom;
+            const worldMidY = (relativeMidY - pan.y) / zoom;
+
+            // Apply zoom factor
+            const newZoom = Math.max(0.1, Math.min(5, zoom * zoomFactor));
+
+            // Calculate new pan to keep the midpoint fixed during zoom
+            const newPanX = relativeMidX - worldMidX * newZoom;
+            const newPanY = relativeMidY - worldMidY * newZoom;
+
+            setZoom(newZoom);
+            setPan({ x: newPanX, y: newPanY });
+            setLastTouchDistance(touchDistance);
+        } else if (mode === 'zoom' && e.touches.length === 1 && isDragging) {
+            // Handle panning with one finger
+            setPan({
+                x: e.touches[0].clientX - dragStart.x,
+                y: e.touches[0].clientY - dragStart.y
+            });
+        }
+    };
+
+    // Handle touch end
+    const handleTouchEnd = () => {
+        setLastTouchDistance(null);
+        setIsDragging(false);
     };
 
     // Close polygon
@@ -504,6 +597,8 @@ const LandAreaCalculator = () => {
         if (!canvas || !image) return;
 
         const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
         const img = imageRef.current;
 
         const draw = () => {
@@ -513,9 +608,30 @@ const LandAreaCalculator = () => {
             ctx.translate(pan.x, pan.y);
             ctx.scale(zoom, zoom);
 
-            // Draw image
-            if (img && img.complete) {
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            // Draw image maintaining aspect ratio
+            if (img && img.complete && img.naturalWidth && img.naturalHeight) {
+                // Calculate the aspect ratio of the image
+                const imgAspectRatio = img.naturalWidth / img.naturalHeight;
+                // Calculate the aspect ratio of the canvas
+                const canvasAspectRatio = canvas.width / canvas.height;
+
+                let renderWidth, renderHeight, offsetX, offsetY;
+
+                if (imgAspectRatio > canvasAspectRatio) {
+                    // Image is wider relative to canvas - fit to width
+                    renderWidth = canvas.width;
+                    renderHeight = canvas.width / imgAspectRatio;
+                    offsetX = 0;
+                    offsetY = (canvas.height - renderHeight) / 2;
+                } else {
+                    // Image is taller relative to canvas - fit to height
+                    renderHeight = canvas.height;
+                    renderWidth = canvas.height * imgAspectRatio;
+                    offsetX = (canvas.width - renderWidth) / 2;
+                    offsetY = 0;
+                }
+
+                ctx.drawImage(img, offsetX, offsetY, renderWidth, renderHeight);
             }
 
             // Draw all layers
@@ -937,14 +1053,17 @@ const LandAreaCalculator = () => {
             <div className="flex-1 overflow-hidden relative bg-gray-200">
                 <canvas
                     ref={canvasRef}
-                    width={1200}
-                    height={800}
+                    width={4000}
+                    height={3000}
                     onClick={handleCanvasClick}
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
                     onMouseUp={handleMouseUp}
                     onMouseLeave={handleMouseUp}
                     onWheel={handleWheel}
+                    onTouchStart={handleTouchStart}
+                    onTouchMove={handleTouchMove}
+                    onTouchEnd={handleTouchEnd}
                     className="absolute inset-0"
                     style={{
                         cursor: mode === 'zoom' ? (isDragging ? 'grabbing' : 'grab') :
@@ -954,7 +1073,7 @@ const LandAreaCalculator = () => {
                 />
                 <img
                     ref={imageRef}
-                    src={image}
+                    src={image || undefined}
                     alt="Map"
                     className="hidden"
                 />
@@ -988,8 +1107,8 @@ const LandAreaCalculator = () => {
                                 <div
                                     key={layer.id}
                                     className={`p-3 rounded-lg border-2 transition-colors ${layer.id === activeLayerId
-                                            ? 'border-blue-500 bg-blue-50'
-                                            : 'border-gray-200 hover:border-gray-300'
+                                        ? 'border-blue-500 bg-blue-50'
+                                        : 'border-gray-200 hover:border-gray-300'
                                         }`}
                                 >
                                     <div className="flex items-center justify-between mb-2">
